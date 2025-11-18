@@ -1,583 +1,645 @@
-# AIra Bot — Final with Logo + Light/Dark toggle + Deep Purple Dark (D2)
-# Single-file Gradio app. Copy & run in Colab or VS Code.
-# If running in a fresh Colab environment, uncomment the install line below.
+# Personal Finance Guide Chatbot - OPTIMIZED VERSION
+# Fast execution with better error handling
+# Run in Google Colab - Single cell
 
-# !pip install --upgrade gradio huggingface_hub pdfplumber python-docx pillow pytesseract
+!pip install -q gradio huggingface_hub
 
-import io, json
-from typing import Optional
 import gradio as gr
-from PIL import Image
+from huggingface_hub import InferenceClient
+import json
+from datetime import datetime, timedelta
 
-# Optional libs
-try:
-    from huggingface_hub import InferenceClient
-except Exception:
-    InferenceClient = None
+# User Database
+USER_DATABASE = {
+    "students": {
+        "STU001": {"password": "student123", "name": "Alex Kumar", "balance": 15000},
+        "STU002": {"password": "study456", "name": "Priya Sharma", "balance": 12000}
+    },
+    "professionals": {
+        "PRO001": {"password": "work123", "name": "Rajesh Patel", "salary": 75000, "balance": 150000},
+        "PRO002": {"password": "prof456", "name": "Anita Singh", "salary": 95000, "balance": 200000}
+    }
+}
 
-try:
-    import pdfplumber
-except Exception:
-    pdfplumber = None
+# Session state
+session_state = {
+    "logged_in": False,
+    "user_type": None,
+    "account_number": None,
+    "user_data": None,
+    "hf_token": None
+}
 
-try:
-    import docx
-except Exception:
-    docx = None
-
-try:
-    import pytesseract
-    TESSERACT_AVAILABLE = True
-except Exception:
-    pytesseract = None
-    TESSERACT_AVAILABLE = False
-
-# ---------------------------
-# Hard-coded credentials (testing)
-# ---------------------------
-STUDENT_ACC = "STU123"
-STUDENT_PWD = "stu@123"
-PROF_ACC = "PRO456"
-PROF_PWD = "pro@456"
-
-# ---------------------------
-# HF model & client
-# ---------------------------
-HF_MODEL = "ibm-granite/granite-3.2-2b-instruct"
-hf_client: Optional[InferenceClient] = None
-
-def init_hf(token: str):
-    global hf_client
-    if InferenceClient is None:
-        raise RuntimeError("Install huggingface_hub: pip install huggingface_hub")
-    hf_client = InferenceClient(token=token)
-    return "Hugging Face token set."
-
-def hf_generate_text(prompt: str, max_new_tokens: int = 512):
-    global hf_client
-    if hf_client is None:
-        return "[ERROR] Set Hugging Face token first."
-    # try prompt= then inputs= for compatibility
-    try:
-        res = hf_client.text_generation(model=HF_MODEL, prompt=prompt, max_new_tokens=max_new_tokens, temperature=0.6, top_p=0.95)
-    except TypeError:
+class FinanceChatbot:
+    def __init__(self):
+        self.client = None
+        self.token_set = False
+    
+    def set_token(self, token):
+        """Initialize with HF token"""
         try:
-            res = hf_client.text_generation(model=HF_MODEL, inputs=prompt, max_new_tokens=max_new_tokens, temperature=0.6, top_p=0.95)
-        except Exception as e2:
-            return f"[HF ERROR] {e2}"
-    except Exception as e:
-        return f"[HF ERROR] {e}"
+            if not token or not token.startswith("hf_"):
+                return "❌ Invalid token format. Should start with 'hf_'"
+            
+            self.client = InferenceClient(token=token)
+            self.token_set = True
+            session_state["hf_token"] = token
+            return "✅ Token set successfully! AI features enabled."
+        except Exception as e:
+            return f"❌ Error: {str(e)}"
+    
+    def generate_response(self, user_message, user_type, user_data):
+        """Generate AI response"""
+        if not self.token_set or not self.client:
+            return "⚠️ Please set your Hugging Face token first in the Settings."
+        
+        try:
+            # Create system prompt
+            if user_type == "student":
+                system_prompt = f"""You are a helpful financial advisor for students.
+User: {user_data['name']} | Balance: ₹{user_data['balance']:,}
 
-    if isinstance(res, str):
-        return res
-    if isinstance(res, dict):
-        return res.get("generated_text") or res.get("text") or json.dumps(res)
-    if isinstance(res, list) and len(res) > 0:
-        if isinstance(res[0], dict):
-            return res[0].get("generated_text") or json.dumps(res[0])
-        return str(res[0])
-    return str(res)
+Provide practical advice on budgeting, savings, and student-friendly investments.
+Keep responses concise (under 200 words) and encouraging."""
+            else:
+                system_prompt = f"""You are an expert financial advisor for professionals.
+User: {user_data['name']} | Salary: ₹{user_data['salary']:,} | Balance: ₹{user_data['balance']:,}
 
-# ---------------------------
-# File extraction helpers
-# ---------------------------
-def extract_pdf(file_obj):
-    if pdfplumber is None:
-        return "PDF extraction requires pdfplumber."
-    try:
-        data = file_obj.read()
-        bio = io.BytesIO(data)
-        texts = []
-        with pdfplumber.open(bio) as pdf:
-            for p in pdf.pages:
-                texts.append(p.extract_text() or "")
-        return "\n".join(texts)
-    except Exception as e:
-        return f"[PDF ERROR] {e}"
+Provide professional advice on investments, tax planning, and wealth building.
+Keep responses detailed but concise (under 250 words)."""
 
-def extract_docx(file_obj):
-    if docx is None:
-        return "DOCX extraction requires python-docx."
-    try:
-        data = file_obj.read()
-        tmp = "/tmp/tmp_docx.docx"
-        with open(tmp, "wb") as f:
-            f.write(data)
-        d = docx.Document(tmp)
-        return "\n".join([p.text for p in d.paragraphs if p.text.strip()])
-    except Exception as e:
-        return f"[DOCX ERROR] {e}"
-
-def extract_txt(file_obj):
-    try:
-        data = file_obj.read()
-        if isinstance(data, bytes):
-            return data.decode("utf-8", errors="ignore")
-        return str(data)
-    except Exception as e:
-        return f"[TXT ERROR] {e}"
-
-def extract_any(file_obj):
-    if file_obj is None:
-        return ""
-    name = file_obj.name.lower()
-    if name.endswith(".pdf"): return extract_pdf(file_obj)
-    if name.endswith(".docx"): return extract_docx(file_obj)
-    if name.endswith(".txt"): return extract_txt(file_obj)
-    return "[UNSUPPORTED FILE]"
-
-# ---------------------------
-# OCR & image analysis
-# ---------------------------
-def ocr_from_image(img: Image.Image):
-    if not TESSERACT_AVAILABLE:
-        return ""
-    try:
-        return pytesseract.image_to_string(img)
-    except Exception:
-        return ""
-
-def analyze_image(img: Image.Image, language: str):
-    ocr_text = ocr_from_image(img)
-    prompt = f"""You are AIra Bot. Language: {language}.
-OCR text:
-\"\"\"{ocr_text}\"\"\"
-Task:
-1) Identify if image is a receipt/invoice/document/photo.
-2) If receipt/invoice, extract vendor, dates, amounts, currency, and item lines.
-Return structured JSON."""
-    return hf_generate_text(prompt, max_new_tokens=450)
-
-# ---------------------------
-# NER and clause extraction
-# ---------------------------
-def do_ner(text: str, language: str):
-    prompt = f"Extract named entities (persons, organizations, dates, monetary amounts) from the text. Return JSON only. Language: {language}\n\nText:\n{text}"
-    return hf_generate_text(prompt, max_new_tokens=500)
-
-def do_clauses(text: str, language: str):
-    prompt = f"Break the following into numbered clauses and provide a one-line simple explanation for each. Return JSON only. Language: {language}\n\n{text}"
-    return hf_generate_text(prompt, max_new_tokens=700)
-
-# ---------------------------
-# Budget split calculator
-# ---------------------------
-def calculate_budget_split(balance):
-    try:
-        bal = float(balance)
-    except:
-        return "Enter a valid numeric balance."
-    bucket_40 = bal * 0.40
-    daily_30 = bal * 0.30
-    loan_30 = bal * 0.30
-    categories = ["Travel", "Future Expenses", "Emergency Funds"]
-    each = bucket_40 / len(categories)
-    text = f"Total Balance: ₹{bal:,.2f}\n\nBucket List (40%) = ₹{bucket_40:,.2f}\n"
-    for c in categories:
-        text += f" - {c}: ₹{each:,.2f}\n"
-    text += f"\nDaily Use (30%) = ₹{daily_30:,.2f}\nPersonal Loans (30%) = ₹{loan_30:,.2f}"
-    return text
-
-# ---------------------------
-# Features & examples
-# ---------------------------
-FEATURE_GROUPS = {
-    "Budget Tools": ["Budget Split Calculator"],
-    "Savings": ["Quick Budget","Smart Categorize","Spending Alerts","Savings Goals","Savings Challenges","Bucket Transfer"],
-    "Investments": ["Starter Investments","Invest Advice","Return Forecast","Market Summary"],
-    "Taxes": ["Tax Tips","Analyze Salary Slip","Form16 Analysis"],
-    "Documents": ["Extract File Text","Get Entities (NER)","Simplify Clauses"]
-}
-
-EXAMPLES = {
-    "Budget Split Calculator":"Enter your bank balance and click Calculate (e.g. 10000).",
-    "Quick Budget":"I earn ₹22,000. Rent 8000, Food 3000, Travel 1200, Books 500. Suggest a budget.",
-    "Smart Categorize":"Cafe - 300; Hostel - 6500; Train - 120; Books - 450; Netflix - 299. Categorize.",
-    "Spending Alerts":"Alert me when weekly food spending exceeds ₹1500.",
-    "Savings Goals":"I want to save ₹10,000 in 6 months. I can save monthly. Suggest a plan.",
-    "Bucket Transfer":"Split 40% to buckets equally: Travel, Future, Emergency.",
-    "Starter Investments":"I can invest ₹2,000/month. Recommend beginner-friendly options.",
-    "Invest Advice":"I have ₹100,000 to invest for 5 years, moderate risk.",
-    "Return Forecast":"Forecast 5-year returns for ₹5,000/month SIP at 10% annual.",
-    "Market Summary":"Summarize current market trends briefly.",
-    "Tax Tips":"Tax-saving options for salaried 12 LPA in India under 80C/80D.",
-    "Analyze Salary Slip":"Basic 50,000; HRA 20,000; PF 6000; TDS 8000. Analyze and suggest proofs.",
-    "Form16 Analysis":"Check Form 16 for taxable income and tax deducted accuracy.",
-    "Extract File Text":"Upload invoice PDF and extract text.",
-    "Get Entities (NER)":"Extract dates and amounts from this bill.",
-    "Simplify Clauses":"Upload a contract and break into simple clauses."
-}
-
-# ---------------------------
-# Pastel & Dark palette mapping
-# ---------------------------
-PASTEL = {
-    "Student": "#FFD6E8",       # pastel pink
-    "Professional": "#FFE9D6",  # pastel peach
-    "Budget Tools": "#FFF5E6",  # cream
-    "Savings": "#DFFFE1",       # green
-    "Investments": "#D6EDFF",   # blue
-    "Taxes": "#FFF9C4",         # yellow
-    "Documents": "#EAD6FF"      # lavender
-}
-
-# Deep Purple Dark (D2) palette for dark mode
-D2_DARK = {
-    "base": "#231933",        # background
-    "card": "#2f2244",        # card
-    "text": "#F5E9FF",        # off-white text
-    "accent": "#F3A6D1",      # pink-lavender accents
-    "button_bg": "#2a1b37",   # dark button bg
-    "button_text": "#ffdff3"  # button text
-}
-
-# Helper: build theme style (background + button colors + logo font)
-def make_theme_style(bg_hex: str, mode: str="light"):
-    """
-    mode: "light" or "dark"
-    bg_hex is the pastel color to use for gradient start (light mode).
-    For dark mode we'll use D2_DARK values.
-    Returns HTML <style> string to inject.
-    """
-    if mode == "dark":
-        b = D2_DARK["base"]
-        card = D2_DARK["card"]
-        text = D2_DARK["text"]
-        accent = D2_DARK["accent"]
-        btn_bg = D2_DARK["button_bg"]
-        btn_text = D2_DARK["button_text"]
-        # body gradient uses dark base and a slightly lighter card color
-        style = f"""
-        <style id='theme-style'>
-          body {{ background: linear-gradient(120deg, {b} 0%, {card} 100%); transition: background 300ms ease; color: {text}; }}
-          .main, .sidebar {{ background: rgba(255,255,255,0.03) !important; color: {text} !important; }}
-          .btn-special {{ background:{btn_bg} !important; color:{btn_text} !important; border:1px solid rgba(255,255,255,0.06) !important; }}
-          .logo-text {{ color: #F49CCF !important; font-family: 'Brush Script MT', 'Brush Script Std', cursive; font-size:20px; }}
-          .muted {{ color: rgba(245,233,255,0.9) !important; }}
-          .input, .textbox, .dropdown, .button, .file-upload {{ background: rgba(255,255,255,0.02) !important; color: {text} !important; border:1px solid rgba(255,255,255,0.04) !important; }}
-        </style>
-        """
-        return style
-    else:
-        # light mode: use pastel bg_hex for gentle gradient
-        safe = bg_hex if bg_hex.startswith("#") else "#" + bg_hex
-        style = f"""
-        <style id='theme-style'>
-          body {{ background: linear-gradient(120deg, {safe} 0%, #ffffff 100%); transition: background 300ms ease; color: #111827; }}
-          .main, .sidebar {{ background: #ffffff !important; color: #111827 !important; }}
-          .btn-special {{ background:#4b2b48 !important; color:#fff !important; border: none !important; }}
-          .logo-text {{ color: #F06292 !important; font-family: 'Brush Script MT', 'Brush Script Std', cursive; font-size:20px; }}
-          .muted {{ color: #6b7280 !important; }}
-          .input, .textbox, .dropdown, .button, .file-upload {{ background: #fff !important; color: #111827 !important; border:1px solid #eee !important; }}
-        </style>
-        """
-        return style
-
-# ---------------------------
-# Logo SVG (cute line-art robot) - colored rose-pink stroke
-# ---------------------------
-ROBOT_SVG = """
-<svg width="46" height="46" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-  <g fill="none" stroke="#F49CCF" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-    <rect x="12" y="18" width="40" height="30" rx="6" />
-    <circle cx="28" cy="30" r="3.2" fill="#F49CCF"/>
-    <circle cx="36" cy="30" r="3.2" fill="#F49CCF"/>
-    <path d="M20 48c0 3 6 6 12 6s12-3 12-6" />
-    <rect x="28" y="8" width="8" height="6" rx="2" />
-    <path d="M14 12 L18 14" />
-    <path d="M50 12 L46 14" />
-  </g>
-</svg>
-"""
-
-# ---------------------------
-# Build Gradio app
-# ---------------------------
-def build_app():
-    # initial light theme style with neutral bg
-    initial_style = make_theme_style("#f6f8fb", mode="light")
-    with gr.Blocks(title="AIra Bot — Finance Assistant", css="""
-        .sidebar { background:#ffffff; padding:14px; border-radius:10px; box-shadow:0 6px 18px rgba(0,0,0,0.06); }
-        .main { background:#ffffff; padding:16px; border-radius:10px; box-shadow:0 6px 18px rgba(0,0,0,0.06); }
-        .muted { color:#6b7280; }
-        .bigtitle { font-size:26px; font-weight:700; color:#1f2937; }
-        .logo-row { display:flex; align-items:center; gap:10px; }
-        .logo-box { display:flex; align-items:center; gap:8px; }
-        .btn-special { border-radius:8px; padding:8px 12px; }
-        """) as demo:
-
-        # inject theme/style
-        theme_html = gr.HTML(initial_style)
-
-        # small header with logo and brush-calligraphy text
-        header_html = gr.HTML(f"""
-            <div class="logo-row">
-              <div class="logo-box">{ROBOT_SVG}</div>
-              <div class="logo-text">AIra Bot</div>
-            </div>
-        """)
-
-        state = gr.State({"role": None, "logged_in": False, "theme": "light", "category": None})
-
-        with gr.Row():
-            with gr.Column(scale=1):
-                with gr.Column(elem_classes="sidebar"):
-                    gr.HTML("<strong>Navigation</strong>")
-                    new_chat = gr.Button("➕ New Chat")
-                    search_chats = gr.Button("🔍 Search Chats")
-                    library_btn = gr.Button("📚 Library")
-                    gr.Markdown("---")
-                    # Light/Dark toggle as radio
-                    theme_choice = gr.Radio(["Light","Dark"], value="Light", label="Theme (Light / Dark)")
-                    gr.Markdown("---")
-                    token_input = gr.Textbox(type="password", label="Hugging Face Token", placeholder="hf_xxx...")
-                    set_token_btn = gr.Button("Set Token", elem_classes="btn-special")
-                    token_status = gr.Textbox(label="Token Status", interactive=False, value="Not set")
-                    gr.Markdown("---")
-                    logout_btn = gr.Button("Logout", visible=False, elem_classes="btn-special")
-                    gr.Markdown("<div class='muted'>Tip: set HF token to enable AI features.</div>")
-
-            with gr.Column(scale=3):
-                with gr.Column(elem_classes="main"):
-                    # header/logo
-                    gr.HTML(f"<div style='display:flex;align-items:center;justify-content:space-between'>{ROBOT_SVG}<div class='logo-text' style='font-size:20px'>AIra Bot</div></div>")
-                    gr.Markdown("<div class='muted'>Your professional finance assistant</div>")
-                    gr.Markdown("---")
-                    # Language at top
-                    language = gr.Dropdown(["English","Hindi","Telugu","Tamil","Kannada","Malayalam","Bengali","Marathi","Gujarati"],
-                                           value="English", label="Language")
-                    gr.Markdown("---")
-                    # login area
-                    gr.Markdown("### Login")
-                    with gr.Row():
-                        with gr.Column():
-                            gr.Markdown("*Student Login*")
-                            stu_acc = gr.Textbox(label="Account Number")
-                            stu_pwd = gr.Textbox(type="password", label="Password")
-                            stu_login = gr.Button("Login as Student", elem_classes="btn-special")
-                        with gr.Column():
-                            gr.Markdown("*Professional Login*")
-                            pro_acc = gr.Textbox(label="Account Number")
-                            pro_pwd = gr.Textbox(type="password", label="Password")
-                            pro_login = gr.Button("Login as Professional", elem_classes="btn-special")
-
-                    login_status = gr.Textbox(label="Login Status", interactive=False, value="Not logged in")
-
-                    gr.Markdown("<hr/>")
-                    # Features (hidden until login)
-                    gr.Markdown("### Features (appear after login)")
-                    feature_category = gr.Radio(list(FEATURE_GROUPS.keys()), label="Category", value="Budget Tools", visible=False)
-                    feature_dropdown = gr.Dropdown([], label="Feature", visible=False)
-                    example_btn = gr.Button("Fill Example", visible=False, elem_classes="btn-special")
-                    user_input = gr.Textbox(lines=4, label="Input / Example", visible=False)
-
-                    # Budget controls (inside Budget Tools category)
-                    budget_balance = gr.Number(label="Enter Balance (₹)", visible=False)
-                    budget_calc_btn = gr.Button("Calculate Budget Split", visible=False, elem_classes="btn-special")
-                    budget_result = gr.Textbox(lines=6, label="Budget Result", visible=False)
-
-                    # file / image
-                    file_input = gr.File(label="Upload file (PDF/DOCX/TXT)", visible=False)
-                    image_input = gr.Image(type="pil", label="Upload image (receipt/photo)", visible=False)
-
-                    run_feature = gr.Button("Run Feature", visible=False, elem_classes="btn-special")
-                    feature_output = gr.Textbox(lines=12, label="Result", visible=False)
-
-                    # Placeholder for search panel and library panel (to be defined later)
-                    search_panel = gr.Group(visible=False)
-                    with search_panel:
-                        gr.Markdown("### Search Chats")
-                        search_query = gr.Textbox(label="Search query (optional)", placeholder="e.g., budget, loan")
-                        search_results = gr.Textbox(label="Results", interactive=False, lines=10)
-                        close_search_btn = gr.Button("Close Search")
-
-                    lib_panel = gr.Group(visible=False)
-                    with lib_panel:
-                        gr.Markdown("### Library")
-                        lib_content = gr.Textbox(label="Saved Items", interactive=False, lines=10)
-                        close_lib_btn = gr.Button("Close Library")
-
-
-        # ----------------- Callbacks -----------------
-
-        # Helper to update theme HTML and button styles
-        def update_theme_html(selected_theme: str, category: Optional[str], role: Optional[str]):
-            # decide base pastel color depending on category or role (priority: category then role)
-            bg_hex = "#f6f8fb"
-            if category:
-                bg_hex = PASTEL.get(category, bg_hex)
-            elif role:
-                bg_hex = PASTEL.get(role, bg_hex)
-            mode = "dark" if selected_theme == "Dark" else "light"
-            return make_theme_style(bg_hex, mode)
-
-        # set token
-        def set_token_cb(tok):
-            if not tok:
-                return "Enter token"
+            # Generate response with timeout protection
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message}
+            ]
+            
+            response = ""
             try:
-                return init_hf(tok.strip())
-            except Exception as e:
-                return f"[TOKEN ERROR] {e}"
+                for message in self.client.chat_completion(
+                    messages=messages,
+                    max_tokens=500,  # Reduced for faster response
+                    model="ibm-granite/granite-3.3-2b-instruct",
+                    stream=True,
+                    temperature=0.7
+                ):
+                    if hasattr(message.choices[0].delta, 'content') and message.choices[0].delta.content:
+                        response += message.choices[0].delta.content
+                        
+                return response.strip() if response else "No response generated. Please try again."
+            
+            except Exception as stream_error:
+                # Fallback: try non-streaming
+                try:
+                    result = self.client.chat_completion(
+                        messages=messages,
+                        max_tokens=500,
+                        model="ibm-granite/granite-3.3-2b-instruct",
+                        temperature=0.7
+                    )
+                    return result.choices[0].message.content
+                except:
+                    return f"⚠️ Model timeout. Here's a quick tip instead:\n\n{self.get_quick_tip(user_type, user_message)}"
+        
+        except Exception as e:
+            return f"❌ Error: {str(e)}\n\nPlease verify your token at huggingface.co/settings/tokens"
+    
+    def get_quick_tip(self, user_type, message):
+        """Fallback tips when AI fails"""
+        tips = {
+            "student": [
+                "💡 Start with the 50/30/20 rule: 50% needs, 30% wants, 20% savings",
+                "💡 Track expenses daily using a simple notebook or app",
+                "💡 Consider opening a recurring deposit (RD) account for disciplined savings",
+                "💡 Use student discounts whenever available - they add up!"
+            ],
+            "professional": [
+                "💡 Maximize 80C deductions (₹1.5L) through ELSS, PPF, or insurance",
+                "💡 Build an emergency fund covering 6 months of expenses",
+                "💡 Diversify investments: 60% equity, 30% debt, 10% gold",
+                "💡 Review and rebalance your portfolio quarterly"
+            ]
+        }
+        import random
+        return random.choice(tips.get(user_type, tips["student"]))
+    
+    def get_feature_response(self, feature_name, user_type, user_data):
+        """Generate feature responses instantly"""
+        responses = {
+            "budget_summary": self.generate_budget_summary(user_type, user_data),
+            "expense_categorization": self.categorize_expenses(user_type, user_data),
+            "savings_goal": self.track_savings_goal(user_type, user_data),
+            "bill_reminder": self.get_bill_reminders(user_type),
+            "investment_suggestions": self.suggest_investments(user_type, user_data),
+            "net_worth": self.calculate_net_worth(user_type, user_data),
+            "tax_saving": self.tax_saving_tips(user_type, user_data),
+            "subscription_tracker": self.track_subscriptions(user_type),
+            "cash_flow": self.predict_cash_flow(user_type, user_data),
+        }
+        return responses.get(feature_name, "Feature coming soon!")
+    
+    def generate_budget_summary(self, user_type, user_data):
+        if user_type == "student":
+            return f"""📊 **Student Budget Summary**
 
-        set_token_btn.click(set_token_cb, inputs=[token_input], outputs=[token_status])
+💰 Current Balance: ₹{user_data['balance']:,}
 
-        # login callbacks: reveal features and set background + show logout
-        def student_login_cb(acc, pwd, lang, theme):
-            if acc != STUDENT_ACC or pwd != STUDENT_PWD:
-                # even on failure, show role-bg to indicate attempt
-                bg = update_theme_html(theme, None, "Student")
-                return "Invalid student credentials", gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), bg, gr.update(visible=False)
-            # success
-            feats = FEATURE_GROUPS["Budget Tools"]
-            bg = update_theme_html(theme, "Budget Tools", "Student")
-            return (f"Student logged in ({acc})",
-                    gr.update(visible=True),  # show category
-                    gr.update(choices=list(FEATURE_GROUPS.keys()), value="Budget Tools", visible=True),  # category radio updated
-                    gr.update(choices=feats, value=feats[0], visible=True),  # feature dropdown updated
-                    gr.update(visible=True),  # example btn visible
-                    bg,
-                    gr.update(visible=True))  # show logout
+**Recommended Monthly Budget:**
+- 🍽️ Food & Groceries: ₹3,000 (30%)
+- 🏠 Hostel/Rent: ₹4,000 (40%)
+- 📚 Books & Supplies: ₹1,000 (10%)
+- 🚌 Travel: ₹800 (8%)
+- 🎮 Entertainment: ₹700 (7%)
+- 💾 Savings: ₹500 (5%)
 
-        # outputs: login_status, feature_category visible, feature_category update, feature_dropdown update, example_btn visible, theme_html value, logout visible
-        stu_login.click(student_login_cb, inputs=[stu_acc, stu_pwd, language, theme_choice], outputs=[login_status, feature_category, feature_category, feature_dropdown, example_btn, theme_html, logout_btn])
+**Total:** ₹10,000/month
 
-        def prof_login_cb(acc, pwd, lang, theme):
-            if acc != PROF_ACC or pwd != PROF_PWD:
-                bg = update_theme_html(theme, None, "Professional")
-                return "Invalid professional credentials", gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), bg, gr.update(visible=False)
-            feats = FEATURE_GROUPS["Budget Tools"]
-            bg = update_theme_html(theme, "Budget Tools", "Professional")
-            return (f"Professional logged in ({acc})",
-                    gr.update(visible=True),
-                    gr.update(choices=list(FEATURE_GROUPS.keys()), value="Budget Tools", visible=True),
-                    gr.update(choices=feats, value=feats[0], visible=True),
-                    gr.update(visible=True),
-                    bg,
-                    gr.update(visible=True))
+💡 Try to save at least 10% of any income!"""
+        else:
+            salary = user_data['salary']
+            return f"""📊 **Professional Budget Summary**
 
-        pro_login.click(prof_login_cb, inputs=[pro_acc, pro_pwd, language, theme_choice], outputs=[login_status, feature_category, feature_category, feature_dropdown, example_btn, theme_html, logout_btn])
+💰 Monthly Salary: ₹{salary:,}
+💵 Balance: ₹{user_data['balance']:,}
 
-        # When theme toggle is clicked: update theme immediately (use current category & role from state via inputs)
-        def theme_change_cb(theme, current_cat, current_role):
-            # update background: if category present use it; else use role; else neutral
-            return update_theme_html(theme, current_cat, current_role)
+**50/30/20 Rule:**
+- 🏠 Essentials (50%): ₹{int(salary*0.5):,}
+- 🎯 Wants (30%): ₹{int(salary*0.3):,}
+- 💎 Savings (20%): ₹{int(salary*0.2):,}
 
-        theme_choice.change(theme_change_cb, inputs=[theme_choice, feature_category, gr.State({"role": None})], outputs=[theme_html])
+**Tax-Saving Target:** ₹{int(salary*0.15):,}
+Invest in 80C, NPS, ELSS"""
+    
+    def categorize_expenses(self, user_type, user_data):
+        if user_type == "student":
+            return """📈 **Expense Categories (Last Month)**
 
-        # When category changes: populate feature dropdown and update background according to category and theme
-        def on_category_change(cat, theme):
-            feats = FEATURE_GROUPS.get(cat, [])
-            bg = update_theme_html(theme, cat, None)
-            return gr.update(choices=feats, value=feats[0] if feats else None, visible=True), bg, gr.update(visible=True)
+🍽️ Food: ₹3,200 (32%)
+🏠 Rent: ₹4,000 (40%)
+📚 Books: ₹950 (9.5%)
+🚌 Travel: ₹850 (8.5%)
+🎮 Entertainment: ₹700 (7%)
+📱 Internet: ₹300 (3%)
 
-        feature_category.change(on_category_change, inputs=[feature_category, theme_choice], outputs=[feature_dropdown, theme_html, example_btn])
+**Total:** ₹10,000
 
-        # When feature selected: show/hide inputs; special-case Budget Split Calculator
-        def on_feature_select(feature_name, category_name, theme):
-            show_example = gr.update(visible=True)
-            show_user_input = gr.update(visible=True)
-            show_file = gr.update(visible=False)
-            show_image = gr.update(visible=False)
-            show_run = gr.update(visible=True)
-            show_output = gr.update(visible=True)
-            show_budget_balance = gr.update(visible=False)
-            show_budget_calc_btn = gr.update(visible=False)
-            show_budget_result = gr.update(visible=False)
+⚠️ Food spending slightly high - try meal planning!"""
+        else:
+            return """📈 **Expense Categories (Last Month)**
 
-            file_features = {"Extract File Text","Get Entities (NER)","Simplify Clauses","Analyze Salary Slip","Form16 Analysis"}
-            image_features = {"Extract File Text"}
+🏠 Rent: ₹25,000 (33%)
+🛒 Groceries: ₹8,000 (11%)
+🚗 Travel: ₹6,000 (8%)
+💳 EMIs: ₹15,000 (20%)
+🍽️ Dining: ₹5,000 (7%)
+🎬 Entertainment: ₹3,000 (4%)
+👔 Shopping: ₹7,000 (9%)
+⚡ Bills: ₹4,000 (5%)
+💰 Savings: ₹2,000 (3%)
 
-            if category_name == "Budget Tools" and feature_name == "Budget Split Calculator":
-                show_example = gr.update(visible=False)
-                show_user_input = gr.update(visible=False)
-                show_file = gr.update(visible=False)
-                show_image = gr.update(visible=False)
-                show_run = gr.update(visible=False)
-                show_output = gr.update(visible=False)
-                show_budget_balance = gr.update(visible=True)
-                show_budget_calc_btn = gr.update(visible=True)
-                show_budget_result = gr.update(visible=True)
-            else:
-                if feature_name in file_features:
-                    show_file = gr.update(visible=True)
-                if feature_name in image_features:
-                    show_image = gr.update(visible=True)
+**Total:** ₹75,000
 
-            bg = update_theme_html(theme, category_name, None)
-            return show_example, show_user_input, show_file, show_image, show_run, show_output, budget_balance, budget_calc_btn, budget_result, bg
+💡 Increase savings to 15%+"""
+    
+    def track_savings_goal(self, user_type, user_data):
+        if user_type == "student":
+            return """🎯 **Savings Goal Tracker**
 
-        feature_dropdown.change(on_feature_select,
-                                inputs=[feature_dropdown, feature_category, theme_choice],
-                                outputs=[example_btn, user_input, file_input, image_input, run_feature, feature_output, budget_balance, budget_calc_btn, budget_result, theme_html])
+**Target:** ₹5,000
+**Saved:** ₹3,200 (64%)
 
-        # Fill example text
-        def fill_example_cb(feature_name):
-            return gr.update(value=EXAMPLES.get(feature_name, ""), visible=True)
+🟩🟩🟩🟩🟩🟩⬜⬜⬜⬜
 
-        example_btn.click(fill_example_cb, inputs=[feature_dropdown], outputs=[user_input])
+**Remaining:** ₹1,800
+**Days Left:** 12
 
-        # Budget calculate
-        budget_calc_btn.click(lambda b: calculate_budget_split(b), inputs=[budget_balance], outputs=[budget_result])
+💡 Save ₹150/day to reach goal!
 
-        # Run other features
-        def run_feature_cb(category, feature_name, text, file, image, lang):
-            if hf_client is None:
-                return "[ERROR] Set Hugging Face token first."
-            if feature_name == "Extract File Text":
-                if not file:
-                    return "Upload a file (PDF/DOCX/TXT)."
-                return extract_any(file)
-            if feature_name == "Get Entities (NER)":
-                content = extract_any(file) if file else text
-                if not content:
-                    return "Provide text or upload a file."
-                return do_ner(content, lang)
-            if feature_name == "Simplify Clauses":
-                content = extract_any(file) if file else text
-                if not content:
-                    return "Provide text or upload a file."
-                return do_clauses(content, lang)
-            if image is not None:
-                return analyze_image(image, lang)
-            prompt = f"You are AIra Bot. Category={category}. Feature={feature_name}. Language={lang}.\nUser input:\n{text}\nProvide a concise professional answer."
-            return hf_generate_text(prompt, max_new_tokens=700)
+🏆 **Challenges:**
+- ☑️ No-Spend Monday
+- ⬜ Cook 5 meals (3/5)
+- ⬜ Walk vs cab (2/7)"""
+        else:
+            return """🎯 **Savings Goal Tracker**
 
-        run_feature.click(run_feature_cb, inputs=[feature_category, feature_dropdown, user_input, file_input, image_input, language], outputs=[feature_output])
+**Target:** ₹15,000/month
+**Saved:** ₹12,000 (80%)
 
-        # Logout resets UI and theme to neutral
-        def logout_cb():
-            neutral = make_theme_style("#f6f8fb", mode="light")
-            return ("Logged out", gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), neutral, gr.update(visible=False))
+🟩🟩🟩🟩🟩🟩🟩🟩⬜⬜
 
-        logout_btn.click(logout_cb, outputs=[login_status, feature_category, feature_dropdown, example_btn, theme_html, logout_btn])
+**Annual Projection:** ₹1,44,000
 
-        # Search chats logic (moved here)
-        # Note: 'chat_history' must be accessible, usually as a global or passed in.
-        # Assuming 'chat_history' is a global list as shown in kernel state.
-        def open_search_panel():
-            global chat_history # Declare chat_history as global to access it
-            if not chat_history:
-                txt = "No saved chats yet."
-            else:
-                lines = []
-                for i, c in enumerate(sorted(chat_history, key=lambda x:x["timestamp"], reverse=True)[:50], start=1):
-                    lines.append(f"{i}. id:{c['id']} [{c['role']}] {c['category']}/{c['feature']} — {c['timestamp']}\nQ: {c['user_text'][:140]}")
-                txt = "\n\n".join(lines)
-            # When opening search, search_panel visible=True, results updated, lib_panel visible=False
-            return gr.update(visible=True), gr.update(value=txt), gr.update(visible=False)
+📊 **Buckets:**
+- Emergency: ₹50,000 ✅
+- Vacation: ₹25,000 (→₹40,000)
+- Home DP: ₹75,000 (→₹2,00,000)"""
+    
+    def get_bill_reminders(self, user_type):
+        if user_type == "student":
+            return """🔔 **Bill Reminders**
 
-        search_chats.click(open_search_panel, outputs=[search_panel, search_results, lib_panel])
+📅 **This Week:**
+- 📱 Mobile - Nov 20 (2 days) - ₹299
+- 🌐 Wi-Fi - Nov 22 (4 days) - ₹500
 
-    return demo
+📅 **Next Week:**
+- 🏠 Rent - Nov 30 - ₹4,000
+- 📺 Netflix - Dec 1 - ₹199
 
-if _name_ == "_main_":
-    # Ensure chat_history and library_list are initialized if this is the entry point
-    # In a typical Colab run, these would be initialized from previous cells or implicitly.
-    # For robustness, we might want to ensure they exist or are empty lists here.
-    if 'chat_history' not in globals():
-        chat_history = []
-    if 'library_list' not in globals():
-        library_list = []
-    app = build_app()
-    app.launch(debug=True)
+💰 Total upcoming: ₹5,000"""
+        else:
+            return """🔔 **Bill Reminders**
+
+📅 **Urgent:**
+- ⚡ Electricity - Nov 20 (2 days) - ₹2,500
+- 💳 Credit Card - Nov 22 (4 days) - ₹15,000 ⚠️
+
+📅 **This Month:**
+- 🏠 Rent - Nov 30 - ₹20,000
+- 🚗 Car EMI - Dec 1 - ₹12,000
+
+💰 Total: ₹50,300"""
+    
+    def suggest_investments(self, user_type, user_data):
+        if user_type == "student":
+            return """💎 **Investment Ideas**
+
+1. **Recurring Deposit**
+   - ₹500/month
+   - Returns: 6-7%
+   - Safe & disciplined
+
+2. **SIP in Index Funds**
+   - ₹500/month
+   - Nifty 50 funds
+   - Long-term growth
+
+3. **Digital Gold**
+   - ₹100-500/month
+   - Easy to liquidate
+
+4. **PPF**
+   - Lock: 15 years
+   - Tax-free: 7-8%
+
+💡 Start: RD + SIP = ₹1,000/month"""
+        else:
+            salary = user_data['salary']
+            inv = int(salary * 0.2)
+            return f"""💎 **Investment Portfolio**
+
+**Monthly Capacity:** ₹{inv:,} (20%)
+
+🎯 **Allocation:**
+1. Equity MF (60%): ₹{int(inv*0.6):,}
+2. Debt (20%): ₹{int(inv*0.2):,}
+3. Gold (10%): ₹{int(inv*0.1):,}
+4. Emergency (10%): ₹{int(inv*0.1):,}
+
+💰 **20-Year Wealth:**
+Investment: ₹{inv*12*20:,}
+Expected: ₹{int(inv*12*20*2.5):,}
+
+🏆 **Tax Benefits:**
+ELSS: ₹46,800/year
+NPS: ₹15,600/year"""
+    
+    def calculate_net_worth(self, user_type, user_data):
+        if user_type == "student":
+            bal = user_data['balance']
+            assets = bal + 5000
+            liab = 2000
+            nw = assets - liab
+            return f"""💰 **Net Worth**
+
+**Assets:** ₹{assets:,}
+- Balance: ₹{bal:,}
+- Items: ₹5,000
+
+**Liabilities:** ₹{liab:,}
+
+**Net Worth:** ₹{nw:,}
+
+📈 Target: +₹50,000 this year"""
+        else:
+            sal = user_data['salary']
+            bal = user_data['balance']
+            assets = bal + (sal * 24)
+            liab = sal * 8
+            nw = assets - liab
+            return f"""💰 **Net Worth**
+
+**Assets:** ₹{assets:,}
+- Balance: ₹{bal:,}
+- Investments: ₹{sal*20:,}
+- Property: ₹{sal*15:,}
+
+**Liabilities:** ₹{liab:,}
+
+**Net Worth:** ₹{nw:,}
+
+📊 Target: ₹{int(nw*1.15):,} (+15%)"""
+    
+    def tax_saving_tips(self, user_type, user_data):
+        if user_type == "student":
+            return """💰 **Tax Awareness**
+
+📚 **Basics:**
+- <₹2.5L: No tax
+- ₹2.5-5L: 5% tax
+- Keep receipts!
+
+💡 **Tips:**
+- Scholarships = tax-free
+- Loan interest deductible
+- Learn about 80C, 80D
+- Get PAN card early"""
+        else:
+            sal = user_data['salary']
+            ann = sal * 12
+            return f"""💰 **Tax-Saving Guide**
+
+**Annual:** ₹{ann:,} (30% slab)
+
+🎯 **Section 80C (₹1.5L):**
+Save ₹45,000 in tax
+
+🏥 **Section 80D:**
+Health insurance - Save ₹22,500
+
+💼 **Others:**
+- NPS 80CCD(1B): Save ₹15,000
+- HRA: Based on rent
+- Home Loan: ₹2L interest
+
+💰 **Total Savings:** ₹82,500+
+
+📋 Review Form 16, maximize 80C!"""
+    
+    def track_subscriptions(self, user_type):
+        if user_type == "student":
+            return """📱 **Subscriptions**
+
+- Netflix: ₹199/mo
+- Spotify: ₹119/mo
+- Google One: ₹130/mo
+- Medium: ₹75/mo
+
+**Total:** ₹523/mo (₹6,276/year)
+
+⚠️ **Save:**
+- Share Netflix: -₹100
+- Free Spotify: -₹119
+- Cancel Medium: -₹75
+
+💰 Potential: -₹294/mo"""
+        else:
+            return """📱 **Subscriptions**
+
+- Netflix: ₹649
+- Prime: ₹1,499/yr
+- Spotify: ₹119
+- LinkedIn: ₹1,700
+- Gym: ₹2,000
+- Cloud: ₹205
+
+**Total:** ₹5,771/mo (₹69,252/year)
+
+⚠️ **Optimize:**
+- Gym: 8 visits (₹250/visit)
+- LinkedIn: Rarely used
+- Consolidate cloud
+
+💰 Save: ₹2,199/mo"""
+    
+    def predict_cash_flow(self, user_type, user_data):
+        if user_type == "student":
+            bal = user_data['balance']
+            daily = 300
+            days = int(bal / daily)
+            date = (datetime.now() + timedelta(days=days)).strftime('%b %d')
+            return f"""📊 **Cash Flow**
+
+**Balance:** ₹{bal:,}
+**Daily Spend:** ₹{daily}
+
+📅 **Prediction:**
+- Lasts: ~{days} days
+- Until: {date}
+
+💡 **Extend:**
+Reduce to ₹250/day → +12 days
+Keep ₹2,000 emergency buffer"""
+        else:
+            bal = user_data['balance']
+            sal = user_data['salary']
+            exp = int(sal * 0.8)
+            months = bal / exp
+            return f"""📊 **Cash Flow**
+
+**Balance:** ₹{bal:,}
+**Monthly Expense:** ₹{exp:,}
+
+📅 **Runway:** {months:.1f} months
+{"✅ Healthy (6+ months)" if months >= 6 else "⚠️ Build to 6 months"}
+
+💰 **3-Month Projection:**
+M1: ₹{bal + sal - exp:,}
+M2: ₹{bal + (sal*2) - (exp*2):,}
+M3: ₹{bal + (sal*3) - (exp*3):,}
+
+Annual surplus: ₹{(sal-exp)*12:,}"""
+
+# Initialize
+chatbot = FinanceChatbot()
+
+def initialize_chatbot(hf_token):
+    return chatbot.set_token(hf_token)
+
+def login(account_number, password):
+    global session_state
+    
+    if account_number in USER_DATABASE["students"]:
+        if USER_DATABASE["students"][account_number]["password"] == password:
+            session_state["logged_in"] = True
+            session_state["user_type"] = "student"
+            session_state["account_number"] = account_number
+            session_state["user_data"] = USER_DATABASE["students"][account_number]
+            return (
+                gr.update(visible=False),
+                gr.update(visible=True),
+                gr.update(visible=False),
+                f"✅ Welcome {session_state['user_data']['name']}!"
+            )
+    
+    if account_number in USER_DATABASE["professionals"]:
+        if USER_DATABASE["professionals"][account_number]["password"] == password:
+            session_state["logged_in"] = True
+            session_state["user_type"] = "professional"
+            session_state["account_number"] = account_number
+            session_state["user_data"] = USER_DATABASE["professionals"][account_number]
+            return (
+                gr.update(visible=False),
+                gr.update(visible=False),
+                gr.update(visible=True),
+                f"✅ Welcome {session_state['user_data']['name']}!"
+            )
+    
+    return (
+        gr.update(visible=True),
+        gr.update(visible=False),
+        gr.update(visible=False),
+        "❌ Invalid. Try STU001/student123 or PRO001/work123"
+    )
+
+def logout():
+    global session_state
+    session_state = {
+        "logged_in": False,
+        "user_type": None,
+        "account_number": None,
+        "user_data": None,
+        "hf_token": None
+    }
+    return (
+        gr.update(visible=True),
+        gr.update(visible=False),
+        gr.update(visible=False),
+        "",
+        []
+    )
+
+def handle_chat(message, history):
+    if not session_state["logged_in"]:
+        return history + [[message, "⚠️ Please login first."]]
+    
+    if not chatbot.token_set:
+        return history + [[message, "⚠️ Please set your HF token in Settings."]]
+    
+    response = chatbot.generate_response(
+        message,
+        session_state["user_type"],
+        session_state["user_data"]
+    )
+    
+    history.append([message, response])
+    return history
+
+def handle_feature_click(feature_name):
+    if not session_state["logged_in"]:
+        return [[None, "⚠️ Please login first."]]
+    
+    response = chatbot.get_feature_response(
+        feature_name,
+        session_state["user_type"],
+        session_state["user_data"]
+    )
+    
+    return [[None, response]]
+
+# Build Interface
+with gr.Blocks(theme=gr.themes.Soft(), title="AIra Bot", css="""
+    .aira-title {
+        color: #FF1493 !important;
+        font-size: 48px !important;
+        font-weight: 700 !important;
+        text-align: center !important;
+        margin-bottom: 10px !important;
+        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif !important;
+    }
+    .aira-subtitle {
+        text-align: center !important;
+        color: #666 !important;
+        font-size: 18px !important;
+    }
+    """) as demo:
+    gr.HTML("""
+    <div class="aira-title">💰 AIra Bot</div>
+    <div class="aira-subtitle">AI-Powered Financial Guidance</div>
+    """)
+    
+    with gr.Row():
+        with gr.Column(scale=1):
+            gr.Markdown("### ⚙️ Settings")
+            hf_token_input = gr.Textbox(
+                label="Hugging Face Token",
+                type="password",
+                placeholder="hf_...",
+                info="Get from huggingface.co/settings/tokens"
+            )
+            init_btn = gr.Button("Set Token", variant="primary")
+            init_status = gr.Textbox(label="Status", value="⚠️ Token not set", interactive=False)
+    
+    login_section = gr.Column(visible=True)
+    with login_section:
+        gr.Markdown("## 🔐 Login")
+        gr.Markdown("**Demo:** STU001/student123 or PRO001/work123")
+        with gr.Row():
+            account_input = gr.Textbox(label="Account", placeholder="STU001")
+            password_input = gr.Textbox(label="Password", type="password")
+        login_btn = gr.Button("Login", variant="primary")
+        login_status = gr.Textbox(label="Status", interactive=False)
+    
+    student_portal = gr.Column(visible=False)
+    with student_portal:
+        gr.Markdown("## 🎓 Student Portal")
+        
+        with gr.Tabs():
+            with gr.Tab("💬 Chat"):
+                chatbot_s = gr.Chatbot(height=350)
+                msg_s = gr.Textbox(placeholder="Ask about budgeting, savings...")
+                with gr.Row():
+                    send_s = gr.Button("Send", variant="primary")
+                    clear_s = gr.Button("Clear")
+            
+            with gr.Tab("📊 Features"):
+                with gr.Row():
+                    gr.Button("📊 Budget").click(lambda: handle_feature_click("budget_summary"), outputs=chatbot_s)
+                    gr.Button("📈 Expenses").click(lambda: handle_feature_click("expense_categorization"), outputs=chatbot_s)
+                    gr.Button("🎯 Goals").click(lambda: handle_feature_click("savings_goal"), outputs=chatbot_s)
+                with gr.Row():
+                    gr.Button("🔔 Bills").click(lambda: handle_feature_click("bill_reminder"), outputs=chatbot_s)
+                    gr.Button("💎 Invest").click(lambda: handle_feature_click("investment_suggestions"), outputs=chatbot_s)
+                    gr.Button("💰 Net Worth").click(lambda: handle_feature_click("net_worth"), outputs=chatbot_s)
+        
+        logout_s = gr.Button("Logout", variant="stop")
+    
+    prof_portal = gr.Column(visible=False)
+    with prof_portal:
+        gr.Markdown("## 💼 Professional Portal")
+        
+        with gr.Tabs():
+            with gr.Tab("💬 Chat"):
+                chatbot_p = gr.Chatbot(height=350)
+                msg_p = gr.Textbox(placeholder="Ask about investments, taxes...")
+                with gr.Row():
+                    send_p = gr.Button("Send", variant="primary")
+                    clear_p = gr.Button("Clear")
+            
+            with gr.Tab("📊 Features"):
+                with gr.Row():
+                    gr.Button("📊 Budget").click(lambda: handle_feature_click("budget_summary"), outputs=chatbot_p)
+                    gr.Button("📈 Expenses").click(lambda: handle_feature_click("expense_categorization"), outputs=chatbot_p)
+                    gr.Button("🎯 Goals").click(lambda: handle_feature_click("savings_goal"), outputs=chatbot_p)
+                with gr.Row():
+                    gr.Button("💰 Tax Tips").click(lambda: handle_feature_click("tax_saving"), outputs=chatbot_p)
+                    gr.Button("💎 Portfolio").click(lambda: handle_feature_click("investment_suggestions"), outputs=chatbot_p)
+                    gr.Button("📊 Cash Flow").click(lambda: handle_feature_click("cash_flow"), outputs=chatbot_p)
+        
+        logout_p = gr.Button("Logout", variant="stop")
+    
+    # Events
+    init_btn.click(initialize_chatbot, inputs=[hf_token_input], outputs=[init_status])
+    login_btn.click(login, inputs=[account_input, password_input], outputs=[login_section, student_portal, prof_portal, login_status])
+    
+    send_s.click(handle_chat, inputs=[msg_s, chatbot_s], outputs=[chatbot_s]).then(lambda: "", outputs=[msg_s])
+    msg_s.submit(handle_chat, inputs=[msg_s, chatbot_s], outputs=[chatbot_s]).then(lambda: "", outputs=[msg_s])
+    clear_s.click(lambda: [], outputs=[chatbot_s])
+    logout_s.click(logout, outputs=[login_section, student_portal, prof_portal, login_status, chatbot_s])
+    
+    send_p.click(handle_chat, inputs=[msg_p, chatbot_p], outputs=[chatbot_p]).then(lambda: "", outputs=[msg_p])
+    msg_p.submit(handle_chat, inputs=[msg_p, chatbot_p], outputs=[chatbot_p]).then(lambda: "", outputs=[msg_p])
+    clear_p.click(lambda: [], outputs=[chatbot_p])
+    logout_p.click(logout, outputs=[login_section, student_portal, prof_portal, login_status, chatbot_p])
+
+demo.launch(debug=True, share=True)
